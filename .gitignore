@@ -1,6 +1,8 @@
 .venv/
 .env
 data/
+docs/
 __pycache__/
 chats.json
 prompts/
+.DS_Store

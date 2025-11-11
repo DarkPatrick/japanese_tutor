@@ -214,6 +214,8 @@ class ChatGPTAgent:
         # Создаём ответ через Responses API
         resp = client.responses.create(
             model=model,
+            tools=[{"type": "web_search"}],
+            tool_choice="auto",
             input=input_messages
         )
 
