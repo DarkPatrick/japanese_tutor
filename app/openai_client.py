@@ -9,7 +9,8 @@ from dotenv import dotenv_values
 
 secrets: dict = dotenv_values(".env")
 OPENAI_API_KEY = secrets["OPENAI_API_KEY"]
-OPENAI_TEXT_MODEL = secrets.get("OPENAI_TEXT_MODEL", "gpt-4o-mini")
+# OPENAI_TEXT_MODEL = secrets.get("OPENAI_TEXT_MODEL", "gpt-4o-mini")
+OPENAI_TEXT_MODEL = secrets.get("OPENAI_TEXT_MODEL", "gpt-5")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -19,6 +20,7 @@ class ChatGPTAgent:
         # openai_api_key оставлен для совместимости интерфейса
         self.chats_path = chats_path
         self.chats = self._load_chats()
+        self.vector_store_id = secrets.get("VECTOR_STORE_ID")
 
     # ===== Работа с чатами =====
 
@@ -41,7 +43,8 @@ class ChatGPTAgent:
         title: str = "",
         description: str = "",
         system_prompt: str = "",
-        response_format: Optional[dict] = None
+        response_format: Optional[dict] = None,
+        vector_store_id: Optional[str] = None
     ) -> str:
         """
         Создаёт новый чат. Единоразово задаются:
@@ -67,7 +70,8 @@ class ChatGPTAgent:
             "description": description,
             "system_prompt": system_prompt or "",
             "response_format": response_format or None,
-            "history": []
+            "history": [],
+            "vector_store_id": self.vector_store_id
         }
         self._save_chats()
         print(f"Создан чат с id: {chat_id}, title: '{title}'")
@@ -176,62 +180,82 @@ class ChatGPTAgent:
         print(f"Чат {chat_id} экспортирован в {filename}")
 
     # ===== Взаимодействие с агентом =====
-
-    def _responses_api_call(
-        self,
-        model: str,
-        messages: List[Dict[str, str]],
-        response_format: Optional[dict] = None
-    ) -> str:
-        """
-        Вызов OpenAI Responses API (совместимо с SDK без параметра `response_format`).
-
-        Если передан `response_format` с JSON-схемой, мы НЕ передаём его как аргумент,
-        а добавляем отдельное системное сообщение-инструкцию со схемой.
-        Это заставляет модель вернуть строгий JSON, валидный по схеме.
-
-        Примечание: в Responses API используется `input`, а не `messages`.
-        """
-        input_messages: List[Dict[str, str]] = list(messages)
-
-        # Инжектим схему в системное сообщение, если она есть
-        if response_format and isinstance(response_format, dict):
-            if response_format.get("type") == "json_schema" and "json_schema" in response_format:
-                try:
-                    schema_obj = response_format["json_schema"]
-                    schema_text = json.dumps(schema_obj, ensure_ascii=False)
-                except Exception:
-                    schema_text = str(response_format["json_schema"])
-
-                schema_instruction = (
-                    "You MUST return a single JSON object that VALIDATES against the following JSON Schema. "
-                    "Return ONLY the raw JSON (no code fences, no extra text, no markdown):\n"
-                    f"{schema_text}"
-                )
-                # Вставляем дополнительный system-промт ПЕРЕД имеющимися сообщениями
-                input_messages = [{"role": "system", "content": schema_instruction}] + input_messages
-
-        # Создаём ответ через Responses API
-        resp = client.responses.create(
-            model=model,
-            tools=[{"type": "web_search"}],
-            tool_choice="auto",
-            input=input_messages
-        )
-
-        # Надёжный способ получить итоговый текст
-        if hasattr(resp, "output_text") and resp.output_text:
-            return resp.output_text.strip()
-
-        # Фолбэк: собрать текст по частям
+    def _collect_output_chunks(resp) -> str:
         chunks: List[str] = []
         if hasattr(resp, "output"):
-            for out in resp.output:
+            for out in getattr(resp, "output") or []:
                 if getattr(out, "type", None) == "message":
                     for item in getattr(out.message, "content", []) or []:
                         if getattr(item, "type", None) == "output_text":
                             chunks.append(item.text)
         return "\n".join(chunks).strip()
+
+    def _responses_api_call(
+        self,
+        model: str,
+        messages: List[Dict[str, str]],
+        response_format: Optional[dict] = None,
+        vector_store_id: Optional[str] = None,
+    ) -> str:
+        """
+        Вызов OpenAI Responses API с кросс-совместимостью:
+        1) Сначала пробуем tools=[{"type":"file_search","vector_store_ids":[VS]}]  ← то, что требует твой сервер (400: tools[0].vector_store_ids)
+        2) Если не прошло — ретраем старым способом:
+        tools=[{"type":"file_search"}] + attachments на последнем user-сообщении.
+        JSON-схему (если есть) инжектим в отдельный system-инструктаж.
+        """
+        input_messages = list(messages)
+
+        # Инжект схемы как system-инструкции (без response_format аргумента)
+        if response_format and isinstance(response_format, dict):
+            if response_format.get("type") == "json_schema" and "json_schema" in response_format:
+                try:
+                    schema_text = json.dumps(response_format["json_schema"], ensure_ascii=False)
+                except Exception:
+                    schema_text = str(response_format["json_schema"])
+                schema_instruction = (
+                    "You MUST return a single JSON object that VALIDATES against the following JSON Schema. "
+                    "Return ONLY the raw JSON (no code fences, no extra text, no markdown):\n"
+                    f"{schema_text}"
+                )
+                input_messages = [{"role": "system", "content": schema_instruction}] + input_messages
+
+        # Попробуем VS из аргумента или из self/chats
+        vs_id = vector_store_id or getattr(self, "vector_store_id", None)
+        if not vs_id:
+            # без векторки — обычный вызов
+            resp = client.responses.create(model=model, input=input_messages)
+            return getattr(resp, "output_text", "").strip() or _collect_output_chunks(resp)
+
+        # === Попытка A: современный формат tools с vector_store_ids на самом tool ===
+        try:
+            resp = client.responses.create(
+                model=model,
+                input=input_messages,
+                tools=[{"type": "file_search", "vector_store_ids": [vs_id]}],
+            )
+            return getattr(resp, "output_text", "").strip() or _collect_output_chunks(resp)
+        except Exception as e_a:
+            # Если сервер старый/иной — fallback на attachments к последнему user
+            # Подготовим копию сообщений с attachments
+            im2 = list(input_messages)
+            for i in range(len(im2) - 1, -1, -1):
+                if im2[i].get("role") == "user":
+                    msg = dict(im2[i])
+                    msg["attachments"] = [{"vector_store_id": vs_id}]
+                    im2[i] = msg
+                    break
+
+            try:
+                resp = client.responses.create(
+                    model=model,
+                    input=im2,
+                    tools=[{"type": "file_search"}],
+                )
+                return getattr(resp, "output_text", "").strip() or _collect_output_chunks(resp)
+            except Exception as e_b:
+                # Оба пути не сработали — пробрасываем первую ошибку для дебага
+                raise e_a
 
 
     def send_message(self, chat_id: str, user_message: str) -> str:
@@ -246,6 +270,7 @@ class ChatGPTAgent:
             raise ValueError(f"Чат {chat_id} не существует. Создайте чат через create_chat().")
 
         chat_data = self.chats[chat_id]
+        vs_id = chat_data.get("vector_store_id") or self.vector_store_id
         history = chat_data["history"]
         system_prompt = chat_data.get("system_prompt", "")
         response_format = chat_data.get("response_format", None)
@@ -264,7 +289,8 @@ class ChatGPTAgent:
         reply_content = self._responses_api_call(
             model=OPENAI_TEXT_MODEL,
             messages=messages,
-            response_format=response_format
+            response_format=response_format,
+            vector_store_id=vs_id
         )
 
         # Обновляем историю чата

@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import List, Dict, Union
 from datetime import datetime, timezone
 import re
+import os
 
 from telegram import Update
 from telegram.constants import ChatAction, ParseMode
@@ -364,6 +365,8 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.chat.send_action(ChatAction.RECORD_VOICE)
                 audio_path = await asyncio.to_thread(synth_dialogue_to_mp3, dialogue)
                 await update.message.reply_audio(audio=open(audio_path, "rb"), title="Аудирование")
+                # remove temporary audio file
+                os.remove(audio_path)
 
                 save_last_audio_script(tg_user_id, audio_script)
 
