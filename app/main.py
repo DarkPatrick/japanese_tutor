@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import re
 import os
 
+from dotenv import dotenv_values
 from telegram import Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import Application, MessageHandler, ContextTypes, filters
@@ -20,6 +21,8 @@ from openai_client import ChatGPTAgent
 # System prompt + JSON schema (строгий формат ответа)
 # ─────────────────────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = Path(PROMPT_PATH).read_text(encoding="utf-8")
+SECRETS = dotenv_values(".env")
+STUDENTS_DIR = SECRETS.get("STUDENTS_DIR", "students")
 
 
 RESPONSE_FORMAT = {
@@ -93,8 +96,8 @@ except Exception:
 # Папка для персистентных данных студентов
 # ─────────────────────────────────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent
-STUDENTS_DIR = BASE_DIR / "data" / "students"
-STUDENTS_DIR.mkdir(parents=True, exist_ok=True)
+# STUDENTS_DIR = BASE_DIR / "data" / "students"
+# STUDENTS_DIR.mkdir(parents=True, exist_ok=True)
 MAX_TG_TEXT = 4000  # чуть меньше реального лимита
 RE_FENCED_AUDIO = re.compile(r"```(?:audio|jp-audio|audio-script)\s*[\s\S]*?```", re.IGNORECASE)
 RE_SPEAKER_LINES = re.compile(r"^(?:[A-ZА-ЯЁ]{1,2}\s*:\s*.+)$", re.MULTILINE)
@@ -167,8 +170,12 @@ async def reply_student_text(update, text: str):
         chunk = safe[i:i+MAX_TG_TEXT]
         await update.message.reply_text(chunk, parse_mode=ParseMode.MARKDOWN_V2)
 
-def student_dir(user_id: Union[int, str]) -> Path:
-    p = STUDENTS_DIR / str(user_id)
+def abs_students_dir() -> Path:
+    project_root = Path(__file__).resolve().parents[1]  # подняться из app/ к корню
+    return (project_root / STUDENTS_DIR).resolve()
+
+def student_dir(user_id: int | str) -> Path:
+    p = abs_students_dir() / str(user_id)
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -182,12 +189,12 @@ def save_score(user_id: Union[int, str], score: int):
 
 def append_stats(user_id: Union[int, str], stats: list):
     """
-    Сохраняет КАЖДЫЙ элемент Bot.stats отдельной строкой в students/<id>/stats.jsonl
+    Сохраняет КАЖДЫЙ элемент Bot.stats отдельной строкой в students/<id>/stats.json
     Формат строки: {"timestamp_utc": "...", "stat": {...}}
     """
     if not isinstance(stats, list):
         return
-    p = student_dir(user_id) / "stats.jsonl"
+    p = student_dir(user_id) / "stats.json"
     stamp = utc_now_iso()
     with p.open("a", encoding="utf-8") as f:
         for item in stats:
@@ -316,7 +323,9 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         # отправляем запрос ассистенту
-        assistant_raw = await asyncio.to_thread(agent.send_message, chat_id, user_text_for_agent)
+        # tg_user_id = update.effective_user.id
+        print("tg_user_id =", tg_user_id)
+        assistant_raw = await asyncio.to_thread(agent.send_message, chat_id, user_text_for_agent, tg_user_id=tg_user_id)
 
         # Сначала попробуем прямой парсинг всего ответа (вдруг уже валиден)
         try:
@@ -357,6 +366,11 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             stats_field = bot_data.get("stats")
             if isinstance(stats_field, list):
                 append_stats(tg_user_id, stats_field)
+            
+            try:
+                agent.sync_user_stats_to_vs(tg_user_id)
+            except Exception as e:
+                print(f"Failed to sync stats to VS for user {tg_user_id}: {e}")
 
             # аудирование (если есть)
             audio_script = (bot_data.get("audio_script") or "").strip()
