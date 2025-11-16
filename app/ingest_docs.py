@@ -2,8 +2,11 @@
 from pathlib import Path
 from dotenv import dotenv_values
 from openai import OpenAI
+from contextlib import ExitStack
+
 
 DOCS_DIR = Path("app/docs")
+
 
 def main():
     secrets = dotenv_values(".env")
@@ -22,16 +25,12 @@ def main():
     # 3) пробуем батч-загрузку (новый SDK)
     try:
         # ВАЖНО: держим файлы открытыми, пока идёт upload_and_poll
-        file_handles = [open(str(p), "rb") for p in files]
-        try:
-            with client.vector_stores.file_batches.upload_and_poll(
+        with ExitStack() as stack:
+            file_handles = [stack.enter_context(open(str(p), "rb")) for p in files]
+            batch = client.vector_stores.file_batches.upload_and_poll(
                 vector_store_id=vs.id,
-                files=file_handles
-            ) as _batch:
-                pass
-        finally:
-            for fh in file_handles:
-                fh.close()
+                files=file_handles,
+            )
         print(f"Uploaded {len(files)} files via file_batches to", vs.id)
 
     except Exception as e:
