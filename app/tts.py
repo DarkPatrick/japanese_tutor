@@ -1,5 +1,5 @@
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from tempfile import NamedTemporaryFile
 from typing import Dict, List
 import os
@@ -18,7 +18,6 @@ FFMPEG_BIN = which("ffmpeg")
 FFPROBE_BIN = which("ffprobe")
 
 AudioSegment.converter = FFMPEG_BIN
-AudioSegment.ffprobe = FFPROBE_BIN
 
 if not FFMPEG_BIN or not FFPROBE_BIN:
     raise RuntimeError(
@@ -27,18 +26,15 @@ if not FFMPEG_BIN or not FFPROBE_BIN:
     )
 
 
-import re
-from contextlib import suppress
-from typing import Dict, List
-
 # маппинг голосов по спикеру
 SPEAKER_VOICES: Dict[str, str] = {
-    "A": OPENAI_TTS_VOICE,  # из .env
-    "B": "verse",           # подбери второй голос
-    "C": "fable",           # можно добавить ещё
+    "A": OPENAI_TTS_VOICE,
+    "B": "verse",
+    "C": "fable",
 }
 
 PAUSE_MS = 300  # пауза между репликами
+
 
 def normalize_speaker_label(s: str) -> str:
     """
@@ -53,9 +49,11 @@ def normalize_speaker_label(s: str) -> str:
     c = repl.get(s[0], s[0])
     return c.upper()
 
+
 def _pick_voice_for_speaker(speaker: str) -> str:
     key = normalize_speaker_label(speaker)
     return SPEAKER_VOICES.get(key, OPENAI_TTS_VOICE)
+
 
 def prepare_tts_text(text: str) -> str:
     """
@@ -76,12 +74,14 @@ def prepare_tts_text(text: str) -> str:
     t = re.sub(r"\s{2,}", " ", t).strip()
     return t
 
+
 def synth_dialogue_to_mp3(dialogue: List[Dict[str, str]]) -> Path:
     """
     Для каждой реплики выбираем голос по метке спикера,
     но в TTS отправляем ТОЛЬКО японский текст без метки.
     """
-    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     out_path = OUT_AUDIO_DIR / f"jlpt_dialog_{ts}.mp3"
 
     merged = AudioSegment.silent(duration=0)

@@ -11,7 +11,6 @@ TELEGRAM_BOT_TOKEN = _cfg.get("TELEGRAM_BOT_TOKEN", "")
 OPENAI_TEXT_MODEL = _cfg.get("OPENAI_TEXT_MODEL", "gpt-4.1-mini")
 OPENAI_TTS_MODEL = str(_cfg.get("OPENAI_TTS_MODEL", "gpt-4o-mini-tts"))
 OPENAI_TTS_VOICE = str(_cfg.get("OPENAI_TTS_VOICE", "alloy"))
-# BOT_OWNER_ID = int(_cfg.get("BOT_OWNER_ID", "0"))
 
 PROMPT_PATH = BASE_DIR / "prompts" / "system_prompt.txt"
 PDF_DIR = BASE_DIR / "data" / "pdfs"
